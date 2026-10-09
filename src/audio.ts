@@ -1,7 +1,9 @@
+import musicUrl from '../PlayerZero - APEX.mp3?url';
+
 type Sound = 'impulsion' | 'fibre' | 'paquets' | 'empty' | 'reload' | 'reloadEnd' | 'impact' | 'hurt' | 'pickup' | 'relay' | 'enemy';
 type Preset = [number, number, number, number, OscillatorType];
 
-const music = new Audio();
+const music = new Audio(musicUrl);
 music.loop = true;
 music.preload = 'none';
 let musicObjectUrl: string | undefined;
