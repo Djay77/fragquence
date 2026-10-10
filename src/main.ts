@@ -1,25 +1,28 @@
 import * as THREE from 'three';
 import { pauseAudio, selectMusic, setVolume, sound, startAudio } from './audio';
-import { cell, HEIGHT, modules, relay, SIZE, spawn, tiles, walkable, WIDTH, world, type Point } from './level';
+import { cell, HEIGHT, level, SIZE, tiles, walkable, WIDTH, world, type EnemyKind, type Point } from './level';
 import './style.css';
 
-type Kind = 'parasite' | 'drone' | 'brouilleur';
+type Kind = EnemyKind;
 type Weapon = 0 | 1 | 2;
 type Enemy = { mesh: THREE.Group; moving: THREE.Group; kind: Kind; hp: number; cooldown: number; flash: number; radius: number; speed: number };
-type Pickup = { mesh: THREE.Group; type: 'module' | 'health' | 'ammo'; index?: number; phase: number };
-type Bolt = { mesh: THREE.Mesh; velocity: THREE.Vector3; life: number; damage: number };
+type Pickup = { mesh: THREE.Group; type: 'module' | 'health' | 'ammo'; index?: number; phase: number; glow?: THREE.Sprite };
+type Bolt = { mesh: THREE.Mesh; velocity: THREE.Vector3; life: number; damage: number; trail?: number };
+type Particle = { mesh: THREE.Mesh | THREE.Sprite; velocity: THREE.Vector3; life: number; duration: number; gravity: number };
+type Tracer = { mesh: THREE.Mesh; start: THREE.Vector3; end: THREE.Vector3; elapsed: number; duration: number };
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
 app.innerHTML = `
   <canvas id="game"></canvas><div id="vignette"></div><div id="damage"></div>
   <div id="hud">
     <div class="topline"></div>
-    <div class="topbar"><div><div class="brand">FRAG<span>QUENCE</span></div><div class="subbrand">BOUYGUES TELECOM / NOEUD 07</div></div><div class="objective"><b>MISSION // RECONNEXION</b><div id="objective-text"></div></div></div>
-    <div id="minimap-wrap"><div class="map-title">CARTOGRAPHIE // 07</div><canvas id="minimap" width="320" height="260"></canvas></div>
+    <div class="topbar"><div><div class="brand">FRAG<span>QUENCE</span></div><div class="subbrand">BOUYGUES TELECOM / ${level.name}</div></div><div class="objective"><b>MISSION // RECONNEXION</b><div id="objective-text"></div></div></div>
+    <div id="minimap-wrap"><div class="map-title">CARTOGRAPHIE // ${level.number}</div><canvas id="minimap" width="320" height="260"></canvas></div>
     <div id="crosshair"></div><div id="prompt"></div><div id="toast"></div>
-    <div class="bottom"><div class="stat"><small>INTEGRITE</small><b id="health">100</b></div><div class="weapon"><small>ARME ACTIVE // <span id="ammo"></span></small><b id="weapon">IMPULSION</b><span id="reload-hint"></span></div></div>
+    <div class="bottom"><div class="stat"><small>INTEGRITE</small><b id="health">100</b></div><div class="arsenal"><div class="arsenal-title">ARSENAL // 1-3</div><div id="weapon-list"></div></div><div class="weapon"><small>ARME ACTIVE // <span id="ammo"></span></small><b id="weapon">IMPULSION</b><span id="reload-hint"></span></div></div>
   </div>
-  <div id="overlay"><div class="panel"><div class="rule"></div><div class="eyebrow">DOSSIER D'INTERVENTION // 001</div><h1>FRAG<span>QUENCE</span></h1><p id="intro">Le Noeud 07 est coupe du reseau. Traversez les secteurs, recuperez trois modules et relancez le relais avant que les parasites ne prennent le controle.</p><div class="features"><span>01 / 3 ARMES</span><span>02 / 3 MODULES</span><span>03 / 1 RELAIS</span><span>04 / SURVIE</span></div><button id="play">ENTRER DANS LE NOEUD &rarr;</button><div class="audio-controls"><label>PISTE LOCALE <input id="music-file" type="file" accept="audio/*" aria-label="Choisir une musique locale"></label><label>MUSIQUE <input id="music-volume" type="range" min="0" max="100" value="15" aria-label="Volume de la musique"></label><label>BRUITAGES <input id="effects-volume" type="range" min="0" max="100" value="50" aria-label="Volume des bruitages"></label></div><p class="controls">ZQSD (AZERTY) / WASD (QWERTY) : BOUGER &nbsp; MAJ : COURIR &nbsp; ESPACE : SAUTER &nbsp; CLIC : TIRER &nbsp; R : RECHARGER &nbsp; 1-3 : ARMES &nbsp; E : INTERAGIR &nbsp; ECHAP : PAUSE<br>Ordinateur avec souris et clavier requis.</p></div></div>
+  <div id="overlay"><div class="panel"><div class="rule"></div><div class="eyebrow">DOSSIER D'INTERVENTION // 00${level.number === 7 ? 1 : 2}</div><h1>FRAG<span>QUENCE</span></h1><p id="intro">${level.briefing}</p><div class="features"><span>01 / 3 ARMES</span><span>02 / 3 MODULES</span><span>03 / 1 RELAIS</span><span>04 / SURVIE</span></div><button id="play">ENTRER DANS LE NOEUD &rarr;</button><div class="audio-controls"><label>PISTE LOCALE <input id="music-file" type="file" accept="audio/*" aria-label="Choisir une musique locale"></label><label>MUSIQUE <input id="music-volume" type="range" min="0" max="100" value="15" aria-label="Volume de la musique"></label><label>BRUITAGES <input id="effects-volume" type="range" min="0" max="100" value="50" aria-label="Volume des bruitages"></label></div><p class="controls">ZQSD (AZERTY) / WASD (QWERTY) : BOUGER &nbsp; MAJ : COURIR &nbsp; ESPACE : SAUTER &nbsp; CLIC : TIRER &nbsp; R : RECHARGER &nbsp; 1-3 : ARMES &nbsp; E : INTERAGIR &nbsp; ECHAP : PAUSE<br>Ordinateur avec souris et clavier requis.</p></div></div>
+  <div id="result" class="hidden" role="dialog" aria-modal="true" aria-labelledby="result-title"><div class="result-panel"><div class="result-line"></div><div class="eyebrow" id="result-sector"></div><h2 id="result-title"></h2><p id="result-message"></p><button id="result-continue">CONTINUER &rarr;</button></div></div>
 `;
 
 const el = (id: string) => document.getElementById(id)!;
@@ -32,11 +35,12 @@ renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.5;
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color('#07141b');
-scene.fog = new THREE.FogExp2('#07141b', 0.014);
+const atmosphere = level.number === 8 ? '#1d171c' : '#07141b';
+scene.background = new THREE.Color(atmosphere);
+scene.fog = new THREE.FogExp2(atmosphere, 0.014);
 const camera = new THREE.PerspectiveCamera(77, window.innerWidth / window.innerHeight, 0.08, 180);
 camera.rotation.order = 'YXZ';
-const start = world(spawn);
+const start = world(level.spawn);
 camera.position.set(start.x, 1.7, start.z);
 scene.add(camera);
 scene.add(new THREE.HemisphereLight('#92edfa', '#10252b', 1.65));
@@ -99,7 +103,7 @@ for (let z = 0; z < HEIGHT; z++) {
   for (let x = 0; x < WIDTH; x++) {
     if (!tiles[z][x]) continue;
     const p = world({ x, z });
-    box(scene, p.x, -0.18, p.z, SIZE, 0.34, SIZE, (x + z) % 3 ? floorMat : altFloor);
+    box(scene, p.x, -0.18, p.z, SIZE, 0.34, SIZE, level.number === 8 && (x + z) % 3 === 0 ? gunMetal : (x + z) % 3 ? floorMat : altFloor);
     box(scene, p.x, 4.6, p.z, SIZE, 0.17, SIZE, dark);
     if ((x + z) % 4 === 0) box(scene, p.x, 0.008, p.z, SIZE - 0.22, 0.012, SIZE - 0.22, panelMat);
     if (x % 4 === 0 && z % 3 === 0) box(scene, p.x, 4.48, p.z, 1.5, 0.04, 0.09, glass);
@@ -112,7 +116,7 @@ for (let z = 0; z < HEIGHT; z++) {
       const w = box(scene, p.x + dx * SIZE / 2, 2.25, p.z + dz * SIZE / 2, SIZE, 4.5, 0.25, wallMat);
       w.rotation.y = angle;
       walls.push(w);
-      const stripe = box(scene, p.x + dx * (SIZE / 2 - 0.15), 0.55, p.z + dz * (SIZE / 2 - 0.15), SIZE, 0.07, 0.1, (x + z) % 6 === 0 ? orange : edgeMat);
+      const stripe = box(scene, p.x + dx * (SIZE / 2 - 0.15), 0.55, p.z + dz * (SIZE / 2 - 0.15), SIZE, 0.07, 0.1, (x + z) % (level.number === 8 ? 3 : 6) === 0 ? orange : edgeMat);
       stripe.rotation.y = angle;
       if ((x * 3 + z * 5) % 4 === 0) {
         const panel = box(scene, p.x + dx * (SIZE / 2 - 0.19), 2.45, p.z + dz * (SIZE / 2 - 0.19), 2.3, 1.2, 0.07, panelMat);
@@ -145,16 +149,54 @@ const decorate = (points: Point[], color: THREE.Material) => {
     }
   }
 };
-decorate([{ x: 24, z: 3 }, { x: 28, z: 3 }, { x: 24, z: 8 }, { x: 28, z: 8 }, { x: 4, z: 17 }, { x: 7, z: 21 }, { x: 24, z: 17 }, { x: 28, z: 21 }], glass);
-for (const p of [spawn, { x: 16, z: 12 }, ...modules, relay]) {
+decorate(level.racks, glass);
+for (const p of [level.spawn, ...level.lights, ...level.modules, level.relay]) {
   const pos = world(p);
-  lamp(pos.x, pos.z, p === relay ? '#ff8241' : '#00e5e1');
+  lamp(pos.x, pos.z, p === level.relay || level.number === 8 && p !== level.spawn && !level.modules.includes(p) ? '#ff8241' : '#00e5e1');
 }
-for (const p of [{ x: 13, z: 9 }, { x: 19, z: 16 }, { x: 7, z: 8 }, { x: 15, z: 21 }]) {
+for (const p of level.markings) {
   const pos = world(p);
   box(scene, pos.x, 0.07, pos.z, 1.8, 0.1, 1.8, orange);
 }
-const relayPos = world(relay);
+const relayPos = world(level.relay);
+const logoFacingSouth = level.number === 8;
+const logoMount = new THREE.Group();
+logoMount.position.set(relayPos.x, 3.3, relayPos.z + (logoFacingSouth ? 3.5 : -3.5));
+logoMount.rotation.y = logoFacingSouth ? 0 : Math.PI;
+scene.add(logoMount);
+box(logoMount, 0, 0, -0.06, 5.9, 2.2, 0.12, gunGrip);
+for (const x of [-2.8, 2.8]) box(logoMount, x, 0, 0.02, 0.07, 2.07, 0.06, edgeMat);
+for (const y of [-1, 1]) box(logoMount, 0, y, 0.02, 5.65, 0.07, 0.06, edgeMat);
+for (const x of [-2.3, 2.3]) box(logoMount, x, 1.2, -0.04, 0.08, 0.35, 0.08, gunHighlight);
+const logoCanvas = document.createElement('canvas');
+logoCanvas.width = 1024;
+logoCanvas.height = 400;
+const logoContext = logoCanvas.getContext('2d')!;
+function petal(x: number, y: number, angle: number, color: string) {
+  logoContext.save();
+  logoContext.translate(x, y);
+  logoContext.rotate(angle);
+  logoContext.fillStyle = color;
+  logoContext.beginPath();
+  logoContext.ellipse(0, 0, 90, 38, 0, 0, Math.PI * 2);
+  logoContext.fill();
+  logoContext.restore();
+}
+petal(459, 112, Math.PI / 3, '#0055a4');
+petal(565, 112, -Math.PI / 3, '#ea5b0f');
+petal(512, 56, 0, '#009dcc');
+logoContext.textAlign = 'center';
+logoContext.fillStyle = '#ffffff';
+logoContext.font = 'bold 105px Arial, sans-serif';
+logoContext.fillText('bouygues', 512, 300);
+logoContext.fillStyle = '#79ddec';
+logoContext.font = 'bold 43px Arial, sans-serif';
+logoContext.fillText('T E L E C O M', 512, 364);
+const logoTexture = new THREE.CanvasTexture(logoCanvas);
+logoTexture.colorSpace = THREE.SRGBColorSpace;
+const logo = new THREE.Mesh(new THREE.PlaneGeometry(5.4, 2.12), new THREE.MeshBasicMaterial({ map: logoTexture, transparent: true, side: THREE.DoubleSide, depthWrite: false }));
+logo.position.z = 0.045;
+logoMount.add(logo);
 box(scene, relayPos.x, 0.22, relayPos.z, 3.6, 0.42, 3.6, gunMetal);
 box(scene, relayPos.x, 0.48, relayPos.z, 2.7, 0.15, 2.7, gunGrip);
 box(scene, relayPos.x, 0.75, relayPos.z, 1.68, 0.48, 1.68, gunMetal);
@@ -169,6 +211,29 @@ for (const size of [2.1, 3.05]) {
 const relayCore = new THREE.Mesh(new THREE.OctahedronGeometry(0.65, 0), relayIdle);
 relayCore.position.set(relayPos.x, 1.96, relayPos.z);
 scene.add(relayCore);
+const glowCanvas = document.createElement('canvas');
+glowCanvas.width = glowCanvas.height = 128;
+const glowContext = glowCanvas.getContext('2d')!;
+const glowGradient = glowContext.createRadialGradient(64, 64, 8, 64, 64, 64);
+glowGradient.addColorStop(0, 'rgba(255,255,255,0.8)');
+glowGradient.addColorStop(0.25, 'rgba(255,255,255,0.45)');
+glowGradient.addColorStop(1, 'rgba(255,255,255,0)');
+glowContext.fillStyle = glowGradient;
+glowContext.fillRect(0, 0, 128, 128);
+const glowTexture = new THREE.CanvasTexture(glowCanvas);
+const relayGlowMaterial = new THREE.SpriteMaterial({ map: glowTexture, color: '#ff8241', transparent: true, opacity: 0.95, blending: THREE.AdditiveBlending, depthTest: true, depthWrite: false, toneMapped: false });
+const relayGlow = new THREE.Sprite(relayGlowMaterial);
+relayGlow.position.set(relayPos.x, 3.55, relayPos.z);
+relayGlow.scale.set(5, 5, 1);
+scene.add(relayGlow);
+const beaconMaterial = new THREE.MeshBasicMaterial({ color: '#ffae5d', toneMapped: false, side: THREE.DoubleSide });
+const relayBeacon = new THREE.Mesh(new THREE.TorusGeometry(0.88, 0.095, 6, 24), beaconMaterial);
+relayBeacon.rotation.x = Math.PI / 2;
+relayBeacon.position.set(relayPos.x, 3.48, relayPos.z);
+scene.add(relayBeacon);
+const relayLight = new THREE.PointLight('#ff8241', 9, 12, 2);
+relayLight.position.copy(relayBeacon.position);
+scene.add(relayLight);
 const relayHalo = new THREE.Group();
 relayHalo.position.set(relayPos.x, 1.96, relayPos.z);
 scene.add(relayHalo);
@@ -186,7 +251,8 @@ for (let i = 0; i < 3; i++) {
 }
 for (const dx of [-1.13, 1.13]) for (const dz of [-1.13, 1.13]) {
   box(scene, relayPos.x + dx, 1.58, relayPos.z + dz, 0.17, 2.2, 0.17, gunHighlight);
-  box(scene, relayPos.x + dx, 2.54, relayPos.z + dz, 0.28, 0.25, 0.28, orange);
+  box(scene, relayPos.x + dx, 1.65, relayPos.z + dz, 0.23, 1.6, 0.23, beaconMaterial);
+  box(scene, relayPos.x + dx, 2.54, relayPos.z + dz, 0.28, 0.25, 0.28, beaconMaterial);
   box(scene, relayPos.x + dx, 0.53, relayPos.z + dz, 0.32, 0.3, 0.32, gunGrip);
 }
 box(scene, relayPos.x, 2.72, relayPos.z, 2.6, 0.16, 0.16, gunMetal);
@@ -196,10 +262,12 @@ const enemies: Enemy[] = [];
 const waveEnemies = new Set<Enemy>();
 const pickups: Pickup[] = [];
 const bolts: Bolt[] = [];
-const particles: { mesh: THREE.Mesh; velocity: THREE.Vector3; life: number }[] = [];
+const tracers: Tracer[] = [];
+const particles: Particle[] = [];
 const moduleTaken = [false, false, false];
 let hp = 100;
 const capacity = [18, 6, 4];
+const weaponNames = ['IMPULSION', 'FUSIL FIBRE', 'LANCE-PAQUETS'];
 const reloadDuration = [1.2, 1.8, 2.2];
 const magazine = [18, 6, 4];
 const reserve = [72, 24, 8];
@@ -207,16 +275,18 @@ let weapon: Weapon = 0;
 const acquired = [true, false, false];
 let wave = false;
 let won = false;
+let finished = false;
 let started = false;
 let yaw = 0;
-// Face the workshop exit toward the central hub.
-yaw = -Math.PI / 2;
+// Face the first exit in each level.
+yaw = level.number === 8 ? 0 : -Math.PI / 2;
 camera.rotation.y = yaw;
 let pitch = 0;
 let vy = 0;
 let grounded = true;
 let shootCooldown = 0;
 let reloadRemaining = 0;
+let flashRemaining = 0;
 let playerHurt = 0;
 let toastTimer = 0;
 let shotsHeld = false;
@@ -248,6 +318,10 @@ for (const x of [-0.18, 0.18]) {
   box(pistol, x * 1.07, 0.05, -0.52, 0.025, 0.08, 0.13, gunCharge);
 }
 box(pistol, 0, 0.32, -0.62, 0.08, 0.12, 0.08, gunCharge);
+const pistolCell = new THREE.Group();
+pistolCell.position.set(0, -0.26, -0.05);
+pistol.add(pistolCell);
+box(pistolCell, 0, 0, 0, 0.14, 0.18, 0.18, gunCharge);
 
 // Long fibre rifle: slim illuminated rail and a substantial rear power unit.
 const rifle = gunModels[1];
@@ -265,6 +339,10 @@ for (const x of [-0.2, 0.2]) {
 }
 box(rifle, 0, 0.32, -0.39, 0.16, 0.3, 0.36, gunGrip);
 box(rifle, 0, 0.49, -0.4, 0.07, 0.045, 0.21, gunCharge);
+const rifleCell = new THREE.Group();
+rifleCell.position.set(0, -0.34, -0.51);
+rifle.add(rifleCell);
+box(rifleCell, 0, 0, 0, 0.18, 0.28, 0.24, gunCharge);
 
 // Heavy launcher: three separate launch tubes, rear canister and hazard markings.
 const launcher = gunModels[2];
@@ -280,25 +358,50 @@ for (const x of [-0.27, 0, 0.27]) {
 }
 box(launcher, 0, -0.3, -0.65, 0.58, 0.25, 0.46, gunHighlight);
 for (const x of [-0.26, 0.26]) box(launcher, x, -0.34, -0.66, 0.06, 0.06, 0.36, gunHeat);
+const launcherCell = new THREE.Group();
+launcherCell.position.set(0, -0.42, -0.65);
+launcher.add(launcherCell);
+box(launcherCell, 0, 0, 0, 0.43, 0.14, 0.34, gunHeat);
+const reloadCells = [pistolCell, rifleCell, launcherCell];
 
-const muzzle = new THREE.PointLight('#00efff', 0, 5);
-muzzle.position.set(0, 0.04, -0.94);
-gun.add(muzzle);
+const flashCanvas = document.createElement('canvas');
+flashCanvas.width = flashCanvas.height = 64;
+const flashContext = flashCanvas.getContext('2d')!;
+const gradient = flashContext.createRadialGradient(32, 32, 2, 32, 32, 31);
+gradient.addColorStop(0, 'rgba(255,255,255,1)');
+gradient.addColorStop(0.25, 'rgba(255,255,255,0.9)');
+gradient.addColorStop(0.6, 'rgba(255,255,255,0.35)');
+gradient.addColorStop(1, 'rgba(255,255,255,0)');
+flashContext.fillStyle = gradient;
+flashContext.fillRect(0, 0, 64, 64);
+const flashMaterial = new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(flashCanvas), color: '#43f6ed', transparent: true, blending: THREE.AdditiveBlending, depthTest: true, depthWrite: false, toneMapped: false });
+const muzzleFlash = new THREE.Sprite(flashMaterial);
+muzzleFlash.visible = false;
+muzzleFlash.scale.set(1.2, 1.2, 1);
+gun.add(muzzleFlash);
 
 function setWeapon(next: Weapon) {
   if (!acquired[next]) { toast('ARME NON TROUVEE'); return; }
   if (next !== weapon) reloadRemaining = 0;
   weapon = next;
   gunModels.forEach((model, index) => { model.visible = index === next; });
-  muzzle.position.set(0, next === 1 ? 0.12 : 0.04, [-0.94, -1.63, -1.55][next]);
-  muzzle.color.set(next === 2 ? '#ff9a4e' : '#00efff');
-  el('weapon').textContent = ['IMPULSION', 'FUSIL FIBRE', 'LANCE-PAQUETS'][next];
+  muzzleFlash.position.set(0, next === 1 ? 0.12 : 0.04, [-0.9, -1.57, -1.5][next]);
+  flashMaterial.color.set(next === 2 ? '#ffaf5c' : '#58fff2');
+  flashRemaining = 0;
+  muzzleFlash.visible = false;
+  el('weapon').textContent = weaponNames[next];
   updateAmmo();
 }
 
 function updateAmmo() {
   el('ammo').textContent = `${magazine[weapon]} / ${reserve[weapon]}`;
   el('reload-hint').textContent = reloadRemaining > 0 ? 'RECHARGEMENT...' : magazine[weapon] < capacity[weapon] && reserve[weapon] > 0 ? 'R / RECHARGER' : '';
+  for (let i = 0; i < weaponNames.length; i++) {
+    const row = el(`weapon-slot-${i}`);
+    row.classList.toggle('active', i === weapon);
+    row.classList.toggle('locked', !acquired[i]);
+    row.querySelector('.slot-status')!.textContent = acquired[i] ? `DISPONIBLE · ${magazine[i]} / ${reserve[i]}` : 'VERROUILLEE';
+  }
 }
 
 function reload() {
@@ -331,11 +434,14 @@ function updateObjective() {
   el('objective-text').innerHTML = won ? 'RESEAU RETABLI' : wave ? `DEFENDEZ LE RELAIS<br><strong>${waveEnemies.size} HOSTILES RESTANTS</strong>` : count === 3 ? 'MODULES RECUPERES<br><strong>ACTIVEZ LE RELAIS [E]</strong>' : `RECUPEREZ LES MODULES<br><strong>${count} / 3 SYNCHRONISES</strong>`;
 }
 
+el('weapon-list').innerHTML = weaponNames.map((name, i) => `<div class="weapon-slot" id="weapon-slot-${i}"><span class="slot-number">0${i + 1}</span><span>${name}</span><span class="slot-status"></span></div>`).join('');
+
 function makePickup(point: Point, type: Pickup['type'], index?: number) {
   const p = world(point);
   const mesh = new THREE.Group();
   mesh.position.set(p.x, 0.9, p.z);
   scene.add(mesh);
+  let glow: THREE.Sprite | undefined;
   if (type === 'module') {
     const frame = new THREE.Group();
     frame.rotation.z = 0.13;
@@ -352,6 +458,10 @@ function makePickup(point: Point, type: Pickup['type'], index?: number) {
     frame.add(core);
     box(frame, 0, 0.13, 0.36, 0.46, 0.09, 0.04, gunHeat);
     for (const x of [-0.28, 0.28]) box(frame, x, 0.12, 0.35, 0.07, 0.4, 0.05, gunHighlight);
+    glow = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTexture, color: '#3bfff0', transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending, depthTest: true, depthWrite: false, toneMapped: false }));
+    glow.position.set(0, 0.18, 0);
+    glow.scale.set(2.4, 2.4, 1);
+    mesh.add(glow);
   } else {
     const trim = type === 'health' ? red : gunHeat;
     box(mesh, 0, 0, 0, 0.95, 0.62, 0.73, gunMetal);
@@ -373,11 +483,11 @@ function makePickup(point: Point, type: Pickup['type'], index?: number) {
       }
     }
   }
-  pickups.push({ mesh, type, index, phase: Math.random() * Math.PI * 2 });
+  pickups.push({ mesh, type, index, phase: Math.random() * Math.PI * 2, glow });
 }
-modules.forEach((p, i) => makePickup(p, 'module', i));
-for (const p of [{ x: 14, z: 10 }, { x: 4, z: 18 }, { x: 25, z: 18 }]) makePickup(p, 'health');
-for (const p of [{ x: 8, z: 7 }, { x: 18, z: 13 }, { x: 27, z: 7 }]) makePickup(p, 'ammo');
+level.modules.forEach((p, i) => makePickup(p, 'module', i));
+for (const p of level.health) makePickup(p, 'health');
+for (const p of level.ammo) makePickup(p, 'ammo');
 
 function makeEnemy(point: Point, kind: Kind) {
   const p = world(point);
@@ -451,12 +561,7 @@ function makeEnemy(point: Point, kind: Kind) {
   updateObjective();
 }
 
-for (const [point, kind] of [
-  [{ x: 14, z: 12 }, 'parasite'], [{ x: 18, z: 11 }, 'drone'],
-  [{ x: 25, z: 7 }, 'parasite'], [{ x: 27, z: 5 }, 'drone'],
-  [{ x: 6, z: 19 }, 'brouilleur'], [{ x: 4, z: 21 }, 'parasite'],
-  [{ x: 25, z: 20 }, 'drone'], [{ x: 27, z: 18 }, 'brouilleur'],
-] as [Point, Kind][]) makeEnemy(point, kind);
+for (const [point, kind] of level.enemies) makeEnemy(point, kind);
 updateObjective();
 setWeapon(0);
 
@@ -468,12 +573,53 @@ function lineOfSight(from: THREE.Vector3, to: THREE.Vector3): boolean {
   return raycaster.intersectObjects(walls, false).length === 0;
 }
 
-function spark(pos: THREE.Vector3, color = '#ffaf61', count = 7) {
+function spark(pos: THREE.Vector3, color = '#ffaf61', count = 7, drift = new THREE.Vector3()) {
   for (let i = 0; i < count; i++) {
-    const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.1, 0.1), new THREE.MeshBasicMaterial({ color }));
+    const size = 0.06 + Math.random() * 0.12;
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(size, size, size * 2), new THREE.MeshBasicMaterial({ color, transparent: true, toneMapped: false }));
     mesh.position.copy(pos);
     scene.add(mesh);
-    particles.push({ mesh, velocity: new THREE.Vector3((Math.random() - 0.5) * 7, Math.random() * 4, (Math.random() - 0.5) * 7), life: 0.4 + Math.random() * 0.4 });
+    const duration = 0.25 + Math.random() * 0.4;
+    particles.push({ mesh, velocity: new THREE.Vector3((Math.random() - 0.5) * 8, Math.random() * 5, (Math.random() - 0.5) * 8).add(drift), life: duration, duration, gravity: 12 });
+  }
+}
+
+function burst(pos: THREE.Vector3, color: string, size: number) {
+  const mesh = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTexture, color, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: true, toneMapped: false }));
+  mesh.position.copy(pos);
+  mesh.scale.set(size, size, 1);
+  scene.add(mesh);
+  particles.push({ mesh, velocity: new THREE.Vector3(), life: 0.22, duration: 0.22, gravity: 0 });
+}
+
+function traceShot(end: THREE.Vector3, type: Weapon) {
+  camera.updateMatrixWorld(true);
+  const start = muzzleFlash.getWorldPosition(new THREE.Vector3());
+  const delta = end.clone().sub(start);
+  const distance = delta.length();
+  if (distance < 0.1) return;
+  const length = Math.min(distance, type === 1 ? 1.6 : 0.8);
+  const direction = delta.normalize();
+  const mesh = new THREE.Mesh(
+    new THREE.CylinderGeometry(type === 1 ? 0.065 : 0.105, type === 1 ? 0.065 : 0.105, length, 6),
+    new THREE.MeshBasicMaterial({ color: type === 1 ? '#aafff7' : '#54eee6', transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false }),
+  );
+  mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction);
+  mesh.position.copy(start).addScaledVector(direction, length / 2);
+  scene.add(mesh);
+  tracers.push({ mesh, start: mesh.position.clone(), end: end.clone().addScaledVector(direction, -length / 2), elapsed: 0, duration: Math.max(0.12, distance / (type === 1 ? 180 : 105)) });
+}
+
+function updateTracers(dt: number) {
+  for (const tracer of [...tracers]) {
+    tracer.elapsed += dt;
+    tracer.mesh.position.lerpVectors(tracer.start, tracer.end, Math.min(1, tracer.elapsed / tracer.duration));
+    if (tracer.elapsed >= tracer.duration) {
+      scene.remove(tracer.mesh);
+      tracer.mesh.geometry.dispose();
+      (tracer.mesh.material as THREE.Material).dispose();
+      tracers.splice(tracers.indexOf(tracer), 1);
+    }
   }
 }
 
@@ -481,7 +627,11 @@ function hitEnemy(enemy: Enemy, damage: number) {
   enemy.hp -= damage;
   enemy.flash = 0.15;
   sound('impact');
-  spark(enemy.mesh.position.clone().add(new THREE.Vector3(0, 1.3, 0)), '#ff6650', 4);
+  const hit = enemy.mesh.position.clone().add(new THREE.Vector3(0, enemy.kind === 'drone' ? 1.7 : enemy.kind === 'brouilleur' ? 1.6 : 0.8, 0));
+  const knockback = camera.position.clone().sub(hit).setY(0).normalize().multiplyScalar(2);
+  burst(hit.clone().addScaledVector(knockback, 0.6), '#fff2bd', 1.25);
+  spark(hit, '#ff6c45', 9, knockback);
+  spark(hit, '#ffd890', 4, knockback);
   if (enemy.hp <= 0) {
     spark(enemy.mesh.position.clone().add(new THREE.Vector3(0, 1, 0)), '#ff9d56', 15);
     scene.remove(enemy.mesh);
@@ -510,7 +660,8 @@ function shoot() {
   magazine[weapon]--;
   sound((['impulsion', 'fibre', 'paquets'] as const)[weapon]);
   updateAmmo();
-  muzzle.intensity = weapon === 2 ? 18 : 10;
+  flashRemaining = 0.12;
+  muzzleFlash.visible = true;
   gun.position.z = -0.55;
   camera.getWorldDirection(aim);
   rayOrigin.copy(camera.position);
@@ -537,13 +688,7 @@ function shoot() {
   }
   if (target) hitEnemy(target, weapon === 1 ? 72 : 19);
   else if (wallHit) spark(wallHit.point, '#4ce9e2', 3);
-  if (weapon === 1) {
-    const end = rayOrigin.clone().addScaledVector(aim, best);
-    const geometry = new THREE.BufferGeometry().setFromPoints([rayOrigin.clone().addScaledVector(aim, 0.7), end]);
-    const beam = new THREE.Line(geometry, new THREE.LineBasicMaterial({ color: '#3cfff2', transparent: true, opacity: 0.9 }));
-    scene.add(beam);
-    window.setTimeout(() => { scene.remove(beam); geometry.dispose(); (beam.material as THREE.Material).dispose(); }, 85);
-  }
+  traceShot(rayOrigin.clone().addScaledVector(aim, best), weapon);
 }
 
 function explosion(pos: THREE.Vector3, damage: number) {
@@ -639,11 +784,19 @@ function updateEnemies(dt: number) {
       if (e.kind === 'parasite' && dist < 2) { hurt(11); e.cooldown = 1.0; }
       else if (e.kind !== 'parasite' && dist < 21) {
         const isJammer = e.kind === 'brouilleur';
-        const mesh = new THREE.Mesh(new THREE.SphereGeometry(isJammer ? 0.22 : 0.14, 8, 6), new THREE.MeshBasicMaterial({ color: isJammer ? '#ff863c' : '#ff384a' }));
+        const boltColor = isJammer ? '#ff9c47' : '#ff405c';
+        const mesh = new THREE.Mesh(new THREE.IcosahedronGeometry(isJammer ? 0.24 : 0.17, 0), new THREE.MeshBasicMaterial({ color: boltColor, toneMapped: false }));
         mesh.position.copy(from);
         const direction = camera.position.clone().sub(from).normalize();
+        const aura = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTexture, color: boltColor, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: true, toneMapped: false }));
+        aura.scale.setScalar(isJammer ? 1.15 : 0.8);
+        mesh.add(aura);
+        const tail = new THREE.Mesh(new THREE.ConeGeometry(isJammer ? 0.16 : 0.11, 0.65, 5), new THREE.MeshBasicMaterial({ color: boltColor, transparent: true, opacity: 0.75, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false }));
+        tail.position.copy(direction).multiplyScalar(-0.34);
+        tail.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction);
+        mesh.add(tail);
         scene.add(mesh);
-        bolts.push({ mesh, velocity: direction.multiplyScalar(isJammer ? 11 : 17), life: 3, damage: isJammer ? -17 : -9 });
+        bolts.push({ mesh, velocity: direction.multiplyScalar(isJammer ? 11 : 17), life: 3, damage: isJammer ? -17 : -9, trail: 0 });
         sound('enemy');
         e.cooldown = isJammer ? 2.5 : 1.3;
       }
@@ -661,14 +814,23 @@ function updateProjectiles(dt: number) {
     raycaster.far = previous.distanceTo(bolt.mesh.position);
     const wallHit = raycaster.intersectObjects(walls, false)[0];
     const hit = bolt.mesh.position.distanceTo(camera.position) < 0.67;
+    bolt.trail = (bolt.trail ?? 0) - dt;
+    if (bolt.trail <= 0 && !wallHit && !hit) {
+      burst(previous, bolt.damage === -17 ? '#ff9c47' : '#ff405c', bolt.damage === -17 ? 0.45 : 0.32);
+      bolt.trail = 0.07;
+    }
     if (wallHit || hit || bolt.life <= 0) {
+      if (wallHit) bolt.mesh.position.copy(wallHit.point);
       if (hit && !wallHit) hurt(-bolt.damage);
       if (bolt.damage === -17 && hit && !wallHit) toast('SIGNAL BROUILLE');
       if (!hit || wallHit) sound('impact');
-      spark(bolt.mesh.position, '#ff7a50', 3);
+      burst(bolt.mesh.position, bolt.damage === -17 ? '#ffb45f' : '#ff6a78', 1.1);
+      spark(bolt.mesh.position, bolt.damage === -17 ? '#ff9c47' : '#ff405c', 6);
+      bolt.mesh.traverse(child => {
+        if (child instanceof THREE.Mesh) child.geometry.dispose();
+        if (child instanceof THREE.Mesh || child instanceof THREE.Sprite) (child.material as THREE.Material).dispose();
+      });
       scene.remove(bolt.mesh);
-      bolt.mesh.geometry.dispose();
-      (bolt.mesh.material as THREE.Material).dispose();
       bolts.splice(bolts.indexOf(bolt), 1);
     }
   }
@@ -678,6 +840,10 @@ function updatePickups(dt: number) {
   for (const item of [...pickups]) {
     item.mesh.rotation.y += dt * 1.5;
     item.mesh.position.y = 0.9 + Math.sin(time * 3 + item.phase) * 0.18;
+    if (item.glow) {
+      const size = 2.4 + Math.sin(time * 3 + item.phase) * 0.3;
+      item.glow.scale.set(size, size, 1);
+    }
     if (item.mesh.position.distanceTo(camera.position.clone().setY(item.mesh.position.y)) > 1.6) continue;
     if (item.type === 'health' && hp >= 100) continue;
     if (item.type === 'module') {
@@ -701,6 +867,7 @@ function updatePickups(dt: number) {
     updateAmmo();
     spark(item.mesh.position, '#36e8e5', 8);
     scene.remove(item.mesh);
+    item.glow?.material.dispose();
     pickups.splice(pickups.indexOf(item), 1);
     updateObjective();
   }
@@ -713,23 +880,31 @@ function interact() {
   sound('relay');
   relayCore.material = relayLive;
   relayRings.forEach(ring => { ring.material = relayLive; });
+  relayGlowMaterial.color.set('#38fff0');
+  beaconMaterial.color.set('#9dfff4');
+  relayLight.color.set('#38fff0');
   toast('RELAIS ACTIF - DEFENDEZ LE NOEUD !');
-  for (const [p, kind] of [
-    [{ x: 13, z: 20 }, 'parasite'], [{ x: 18, z: 20 }, 'parasite'],
-    [{ x: 14, z: 16 }, 'drone'], [{ x: 19, z: 16 }, 'brouilleur'],
-    [{ x: 11, z: 15 }, 'parasite'],
-  ] as [Point, Kind][]) makeEnemy(p, kind);
+  for (const [p, kind] of level.wave) makeEnemy(p, kind);
   updateObjective();
 }
 
 function finish(success: boolean) {
+  if (finished) return;
+  finished = true;
   won = success;
   shotsHeld = false;
   pauseAudio();
   if (document.pointerLockElement === canvas) document.exitPointerLock();
-  el('overlay').classList.remove('hidden');
-  el('intro').textContent = success ? 'Le relais est retabli. Les trois modules sont synchronises et le reseau est de nouveau operationnel.' : 'Le Noeud 07 est perdu. Reprenez l intervention depuis l atelier et retentez la reconnexion.';
-  el('play').textContent = 'RECOMMENCER LA MISSION →';
+  el('hud').classList.remove('active');
+  el('overlay').classList.add('hidden');
+  el('result').classList.remove('hidden');
+  el('result').classList.toggle('victory', success);
+  el('result-sector').textContent = `${level.name} // ${success ? 'RECONNEXION REUSSIE' : 'SIGNAL PERDU'}`;
+  el('result-title').textContent = success ? 'VICTOIRE' : 'DEFAITE';
+  el('result-message').textContent = success ? 'Le relais est retabli. Le reseau est de nouveau operationnel.' : 'Votre integrite est tombee a zero. Le relais attend une nouvelle intervention.';
+  el('intro').textContent = success ? level.number === 7 ? 'Le Noeud 07 est retabli. Le centre de transit du Noeud 08 appelle a l aide : poursuivez l intervention.' : 'Le Noeud 08 est retabli. Les deux secteurs sont reconnectes : mission accomplie.' : `Le ${level.name} est perdu. Reprenez l intervention et retentez la reconnexion.`;
+  el('play').textContent = success && level.number === 7 ? 'NIVEAU SUIVANT : NOEUD 08 →' : 'RECOMMENCER LA MISSION →';
+  el('result-continue').focus();
   updateObjective();
 }
 
@@ -751,7 +926,7 @@ function renderMap() {
     map.fillStyle = '#ffaf6a';
     map.fillRect((p.x + 0.3) * sx, (p.z + 0.3) * sz, sx * 0.5, sz * 0.5);
   }
-  const r = relay;
+  const r = level.relay;
   map.strokeStyle = wave ? '#25fff2' : '#ff9a5c';
   map.lineWidth = 2;
   map.strokeRect((r.x + 0.1) * sx, (r.z + 0.1) * sz, sx * 0.8, sz * 0.8);
@@ -784,10 +959,19 @@ function updatePlayer(dt: number) {
   vy -= 22 * dt;
   camera.position.y += vy * dt;
   if (camera.position.y <= 1.7) { camera.position.y = 1.7; vy = 0; grounded = true; }
+  const reloadProgress = reloadRemaining > 0 ? 1 - reloadRemaining / reloadDuration[weapon] : 0;
+  const reloadDip = reloadRemaining > 0 ? Math.sin(Math.PI * reloadProgress) : 0;
   gun.position.x = 0.48 + Math.sin(time * 11) * 0.014 * (Math.abs(forward) + Math.abs(sideways));
-  gun.position.y = -0.42 + Math.cos(time * 11) * 0.012 * (Math.abs(forward) + Math.abs(sideways));
-  gun.position.z = THREE.MathUtils.lerp(gun.position.z, -0.75, Math.min(1, dt * 13));
-  muzzle.intensity = Math.max(0, muzzle.intensity - dt * 80);
+  gun.position.y = -0.42 + Math.cos(time * 11) * 0.012 * (Math.abs(forward) + Math.abs(sideways)) - reloadDip * 0.32;
+  gun.position.z = THREE.MathUtils.lerp(gun.position.z, -0.75 + reloadDip * 0.22, Math.min(1, dt * 13));
+  gun.rotation.z = reloadDip * -0.35;
+  reloadCells.forEach((cell, index) => { cell.position.y = [-0.26, -0.34, -0.42][index] - (index === weapon ? reloadDip * 0.24 : 0); });
+  flashRemaining = Math.max(0, flashRemaining - dt);
+  muzzleFlash.visible = flashRemaining > 0;
+  if (muzzleFlash.visible) {
+    const size = [1.15, 1.4, 1.7][weapon] * (0.8 + flashRemaining / 0.12 * 0.2);
+    muzzleFlash.scale.set(size, size, 1);
+  }
   const nearRelay = Math.hypot(camera.position.x - relayPos.x, camera.position.z - relayPos.z) < 4.5;
   el('prompt').textContent = nearRelay && !wave && moduleTaken.every(Boolean) ? '[ E ] ACTIVER LE RELAIS' : nearRelay && !wave ? '3 MODULES NECESSAIRES' : '';
 }
@@ -804,16 +988,28 @@ function animate() {
     updateEnemies(dt);
     updateBolts(dt);
     updateProjectiles(dt);
+    updateTracers(dt);
     updatePickups(dt);
     for (const effect of [...particles]) {
       effect.life -= dt;
       effect.mesh.position.addScaledVector(effect.velocity, dt);
-      effect.velocity.y -= dt * 11;
-      if (effect.life <= 0) { scene.remove(effect.mesh); effect.mesh.geometry.dispose(); (effect.mesh.material as THREE.Material).dispose(); particles.splice(particles.indexOf(effect), 1); }
+      effect.velocity.y -= dt * effect.gravity;
+      (effect.mesh.material as THREE.MeshBasicMaterial | THREE.SpriteMaterial).opacity = Math.max(0, effect.life / effect.duration);
+      if (effect.life <= 0) {
+        scene.remove(effect.mesh);
+        if (effect.mesh instanceof THREE.Mesh) effect.mesh.geometry.dispose();
+        (effect.mesh.material as THREE.Material).dispose();
+        particles.splice(particles.indexOf(effect), 1);
+      }
     }
     for (const obj of animated) obj.mesh.position.y = obj.base + Math.sin(time * obj.speed * 3) * 0.12;
     relayCore.position.y = 1.96 + Math.sin(time * 2.4) * 0.12;
     relayCore.rotation.y = time * (wave ? 1.8 : 0.6);
+    const pulse = 0.5 + 0.5 * Math.sin(time * (wave ? 5 : 3));
+    relayGlowMaterial.opacity = 0.75 + pulse * 0.2;
+    relayGlow.scale.setScalar((wave ? 5.8 : 5) + pulse * 0.7);
+    relayBeacon.scale.setScalar(1 + pulse * 0.16);
+    relayLight.intensity = (wave ? 18 : 13) + pulse * 5;
     relayHalo.position.y = relayCore.position.y;
     relayHalo.rotation.y = time * (wave ? -1.2 : -0.4);
     toastTimer -= dt;
@@ -826,7 +1022,13 @@ function animate() {
 }
 animate();
 
+el('result-continue').addEventListener('click', () => {
+  el('result').classList.add('hidden');
+  el('overlay').classList.remove('hidden');
+  el('play').focus();
+});
 el('play').addEventListener('click', () => {
+  if (won && level.number === 7) { window.location.search = '?level=2'; return; }
   if (hp <= 0 || won) { window.location.reload(); return; }
   startAudio();
   canvas.requestPointerLock();
